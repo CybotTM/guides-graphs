@@ -13,45 +13,88 @@ declare(strict_types=1);
 
 namespace phpDocumentor\Guides\Graphs\Renderer;
 
+use FilesystemIterator;
 use phpDocumentor\Guides\RenderContext;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
 
+use function basename;
 use function is_dir;
+use function realpath;
 use function rmdir;
 use function sys_get_temp_dir;
+use function uniqid;
+use function unlink;
+
+use const DIRECTORY_SEPARATOR;
 
 final class PlantumlRendererTest extends TestCase
 {
-    /**
-     * @runInSeparateProcess
-     */
+    private const TEMP_DIR_PREFIX = 'plantuml-test-';
+
     public function testRenderCreatesTempDirectoryWhenMissing(): void
     {
-        $tempDir = sys_get_temp_dir() . PlantumlRenderer::TEMP_SUBDIRECTORY;
+        $tempDir = sys_get_temp_dir() . '/' . self::TEMP_DIR_PREFIX . uniqid('', true);
 
-        // Remove the directory if it exists to test creation
-        if (is_dir($tempDir)) {
-            @rmdir($tempDir);
-        }
+        self::assertDirectoryDoesNotExist($tempDir);
 
-        // Skip if we can't remove it (contains files from other processes)
-        if (is_dir($tempDir)) {
-            self::markTestSkipped('Cannot remove temp directory - it contains files from other processes');
-        }
-
-        // Use a non-existent binary path - the render will fail but directory should be created first
-        $renderer = new PlantumlRenderer(new NullLogger(), '/non/existent/plantuml');
+        $renderer = new PlantumlRenderer(new NullLogger(), '/non/existent/plantuml', $tempDir);
 
         $renderContext = $this->createMock(RenderContext::class);
         $renderContext->method('getLoggerInformation')->willReturn([]);
 
-        // The render will fail due to missing binary, but the temp directory should be created
-        $renderer->render($renderContext, 'A -> B');
+        try {
+            // Render will fail (returns null) or throw due to non-existent plantuml binary.
+            // We only care about verifying that the temp directory was created.
+            $renderer->render($renderContext, 'A -> B');
+        } catch (\Throwable) {
+            // Expected: plantuml binary doesn't exist
+        }
 
-        self::assertDirectoryExists($tempDir);
+        self::assertDirectoryExists($tempDir, 'Temp directory should have been created');
 
-        // Clean up
-        @rmdir($tempDir);
+        $this->removeTempDirSafely($tempDir);
+    }
+
+    private function removeTempDirSafely(string $dir): void
+    {
+        if ($dir === '' || !is_dir($dir)) {
+            return;
+        }
+
+        $realDir = realpath($dir);
+        if ($realDir === false) {
+            return;
+        }
+
+        $realSysTmp = realpath(sys_get_temp_dir());
+        if ($realSysTmp === false) {
+            return;
+        }
+
+        // Safety: must be under system temp and have our prefix
+        self::assertStringStartsWith(
+            $realSysTmp . DIRECTORY_SEPARATOR,
+            $realDir . DIRECTORY_SEPARATOR,
+            'Refusing to delete directory outside system temp',
+        );
+        self::assertStringContainsString(
+            self::TEMP_DIR_PREFIX,
+            basename($realDir),
+            'Refusing to delete directory without expected prefix',
+        );
+
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($realDir, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST,
+        );
+
+        foreach ($iterator as $file) {
+            $file->isDir() ? @rmdir($file->getPathname()) : @unlink($file->getPathname());
+        }
+
+        @rmdir($realDir);
     }
 }
